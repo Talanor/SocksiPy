@@ -40,11 +40,19 @@ class Proxy(object):
     def __init__(self, addr=None, port=None, rdns=True, username=None, password=None):
         super(Proxy, self).__init__()
         self.addr = addr
-        self.port = port
+        self._port = port
         self.rdns = rdns
         self.username = username
         self.password = password
         self.next = None
+
+    @property
+    def port(self):
+        return self._port if self._port is not None else getattr(self.__class__, "DEFAULT_PORT")
+
+    @port.setter
+    def port(self, value):
+        self._port = value
 
     def chain(self, proxy):
         self.next = proxy
@@ -428,16 +436,24 @@ class ProxySocket(socket.socket):
         """
 
         if self.proxy is not None:
-            portnum = self.proxy.port if self.proxy is not None else getattr(
-                self.proxy.__class__, "DEFAULT_PORT"
-            )
             dest = destpair
-            destpair = (self.proxy.addr, portnum)
+            destpair = (self.proxy.addr, self.proxy.port)
 
-        super(ProxySocket, self).connect((destpair[0], destpair[1]))
+        super(ProxySocket, self).connect(
+            (destpair[0], destpair[1])
+        )
 
-        if self.proxy is not None:
-            self.proxy.negotiate(self, dest[0], dest[1])
+        proxy = self.proxy
+        again = True
+        while again is True:
+            if proxy.next is None:
+                destpair = dest
+                again = False
+            else:
+                proxy = proxy.next
+                destpair = (proxy.addr, proxy.port)
+            proxy.negotiate(self, destpair[0], destpair[1])
+
 
 for subclass in Proxy.__subclasses__():
     setattr(socket, subclass.__name__, subclass)
