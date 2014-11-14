@@ -34,14 +34,30 @@ import socket
 import struct
 import collections
 
-_proxytypes = collections.OrderedDict([
+proxytypes = collections.OrderedDict([
     ("SOCKS4", 1080),
     ("SOCKS5", 1080),
     ("HTTP", 8080)
 ])
 
-_defaultproxy = None
-_orgsocket = socket.socket
+
+class Proxy(object):
+    """docstring for Proxy"""
+    def __init__(self, type=None, addr=None, port=None, rdns=True, username=None, password=None):
+        super(Proxy, self).__init__()
+        self.type = type
+        self.addr = addr
+        self.port = port
+        self.rdns = rdns
+        self.username = username
+        self.password = password
+        self.next = None
+
+    def chain(self, proxy):
+        self.next = proxy
+
+defaultproxy = None
+origsocket = socket.socket
 
 
 class ProxyError(Exception):
@@ -130,22 +146,16 @@ _socks4errors = (
 )
 
 
-def setdefaultproxy(
-        proxytype=None,
-        addr=None,
-        port=None,
-        rdns=True,
-        username=None,
-        password=None):
+def setdefaultproxy(proxy):
     """setdefaultproxy(proxytype, addr[, port[, rdns[, username[, password]]]])
     Sets a default proxy which all further proxysocket objects will use,
     unless explicitly changed.
     """
-    global _defaultproxy
-    _defaultproxy = (proxytype, addr, port, rdns, username, password)
+    global defaultproxy
+    defaultproxy = proxy
 
 
-class proxysocket(socket.socket):
+class ProxySocket(socket.socket):
     """proxysocket([family[, type[, proto]]]) -> socket object
 
     Open a SOCKS enabled socket. The parameters are the same as
@@ -154,11 +164,8 @@ class proxysocket(socket.socket):
     """
 
     def __init__(self, *args, **kwargs):
-        _orgsocket.__init__(self, *args, **kwargs)
-        if _defaultproxy is not None:
-            self.__proxy = _defaultproxy
-        else:
-            self.__proxy = (None, None, None, None, None, None)
+        origsocket.__init__(self, *args, **kwargs)
+        self.proxy = defaultproxy
         self.__proxysockname = None
         self.__proxypeername = None
 
@@ -172,7 +179,7 @@ class proxysocket(socket.socket):
             data = data + self.recv(bytes-len(data))
         return data
 
-    def setproxy(self, proxytype=None, addr=None, port=None, rdns=True, username=None, password=None):
+    def setproxy(self, proxy):
         """setproxy(proxytype, addr[, port[, rdns[, username[, password]]]])
         Sets the proxy to be used.
         proxytype -The type of the proxy to be used. Three types
@@ -189,14 +196,14 @@ class proxysocket(socket.socket):
         password -	Password to authenticate with to the server.
                 Only relevant when username is also provided.
         """
-        self.__proxy = (proxytype, addr, port, rdns, username, password)
+        self.proxy = proxy
 
     def negotiatesocks5(self, destaddr, destport):
         """negotiatesocks5(self,destaddr,destport)
         Negotiates a connection through a SOCKS5 server.
         """
         # First we'll send the authentication packages we support.
-        if self.__proxy[4] is not None and self.__proxy[5] is not None:
+        if any((self.proxy.username, self.proxy.password)):
             # The username/password details were supplied to the
             # setproxy method so we support the USERNAME/PASSWORD
             # authentication (in addition to the standard none).
@@ -207,18 +214,25 @@ class proxysocket(socket.socket):
             self.sendall("\x05\x01\x00")
         # We'll receive the server's response to determine which
         # method was selected
-        chosenauth = self.__recvall(2)
-        if chosenauth[0] != "\x05":
+        chosen_auth = self.__recvall(2)
+        if chosen_auth[0] != "\x05":
             self.close()
             raise GeneralProxyError((1, _generalerrors[1]))
         # Check the chosen authentication method
-        if chosenauth[1] == "\x00":
+        elif chosen_auth[1] == "\x00":
             # No authentication is required
             pass
-        elif chosenauth[1] == "\x02":
+        elif chosen_auth[1] == "\x02":
             # Okay, we need to perform a basic username/password
             # authentication.
-            self.sendall("\x01" + chr(len(self.__proxy[4])) + self.__proxy[4] + chr(len(self.proxy[5])) + self.__proxy[5])
+            self.sendall(
+                "\x01%c%s%c%s" % (
+                    chr(len(self.proxy.username)),
+                    self.proxy.username,
+                    chr(len(self.proxy.password)),
+                    self.proxy.password
+                )
+            )
             authstat = self.__recvall(2)
             if authstat[0] != "\x01":
                 # Bad response
@@ -245,7 +259,7 @@ class proxysocket(socket.socket):
             req = req + "\x01" + ipaddr
         except socket.error:
             # Well it's not an IP number,  so it's probably a DNS name.
-            if self.__proxy[3] is True:
+            if self.proxy.rdns is True:
                 # Resolve remotely
                 ipaddr = None
                 req = req + "\x03" + chr(len(destaddr)) + destaddr
@@ -293,7 +307,7 @@ class proxysocket(socket.socket):
         """getproxypeername() -> address info
         Returns the IP and port number of the proxy.
         """
-        return _orgsocket.getpeername(self)
+        return origsocket.getpeername(self)
 
     def getpeername(self):
         """getpeername() -> address info
@@ -312,7 +326,7 @@ class proxysocket(socket.socket):
             ipaddr = socket.inet_aton(destaddr)
         except socket.error:
             # It's a DNS name. Check where it should be resolved.
-            if self.__proxy[3] is True:
+            if self.proxy.rdns is True:
                 ipaddr = "\x00\x00\x00\x01"
                 rmtrslv = True
             else:
@@ -320,8 +334,8 @@ class proxysocket(socket.socket):
         # Construct the request packet
         req = "\x04\x01" + struct.pack(">H", destport) + ipaddr
         # The username parameter is considered userid for SOCKS4
-        if self.__proxy[4] is not None:
-            req = req + self.__proxy[4]
+        if self.proxy.username is not None:
+            req = req + self.proxy.username
             req = req + "\x00"
         # DNS name if remote resolving is required
         # NOTE: This is actually an extension to the SOCKS4 protocol
@@ -355,7 +369,7 @@ class proxysocket(socket.socket):
         Negotiates a connection through an HTTP server.
         """
         # If we need to resolve locally, we do this now
-        if self.__proxy[3] is False:
+        if self.proxy.rdns is False:
             addr = socket.gethostbyname(destaddr)
         else:
             addr = destaddr
@@ -392,30 +406,31 @@ class proxysocket(socket.socket):
         if (type(destpair) in (list, tuple) is False) or (len(destpair) < 2) or (type(destpair[0]) != str) or (type(destpair[1]) != int):
             raise GeneralProxyError((5, _generalerrors[5]))
 
-        if self.__proxy[0] is not None:
+        if self.proxy is not None:
             try:
-                proxytype = _proxytypes.items()[self.__proxy[0]]
+                proxytype = proxytypes.items()[self.proxy.type]
             except IndexError:
                 raise GeneralProxyError((4, _generalerrors[4]))
 
             try:
-                f = getattr(self, "negotiate%s" % (proxytype[0].lower()))
+                pconnect = getattr(self, "negotiate%s" % (proxytype[0].lower()))
             except AttributeError:
                 raise GeneralProxyError((4, _generalerrors[4]))
 
-            portnum = self.__proxy[2] if self.__proxy[2] is not None else proxytype[1]
+            portnum = self.proxy.port if self.proxy is not None else proxytype[1]
             dest = destpair
-            destpair = (self.__proxy[1], portnum)
+            destpair = (self.proxy.addr, portnum)
 
-        _orgsocket.connect(self, (destpair[0], destpair[1]))
+        origsocket.connect(self, (destpair[0], destpair[1]))
 
-        if self.__proxy[0]:
-            f(dest[0], dest[1])
+        if self.proxy is not None:
+            pconnect(dest[0], dest[1])
 
 i = 0
-for k, v in _proxytypes.items():
+for k, v in proxytypes.items():
     setattr(socket, "PROXY_TYPE_%s" % (k), i)
     i += 1
 
-socket.socket = proxysocket
+socket.socket = ProxySocket
+socket.Proxy = Proxy
 socket.setdefaultproxy = setdefaultproxy
