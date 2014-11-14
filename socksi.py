@@ -59,7 +59,7 @@ class Proxy(object):
         """getproxypeername() -> address info
         Returns the IP and port number of the proxy.
         """
-        return origsocket.getpeername(self)
+        return self.getpeername()
 
     def getpeername(self):
         """getpeername() -> address info
@@ -277,7 +277,6 @@ class HTTPProxy(Proxy):
         self.__proxypeername = (addr, destport)
 
 defaultproxy = None
-origsocket = socket.socket
 
 
 class ProxyError(Exception):
@@ -386,7 +385,7 @@ class ProxySocket(socket.socket):
     """
 
     def __init__(self, *args, **kwargs):
-        origsocket.__init__(self, *args, **kwargs)
+        super(ProxySocket, self).__init__(*args, **kwargs)
         self.proxy = defaultproxy
         self.__proxysockname = None
         self.__proxypeername = None
@@ -429,11 +428,13 @@ class ProxySocket(socket.socket):
         """
 
         if self.proxy is not None:
-            portnum = self.proxy.port if self.proxy is not None else getattr(self.proxy.__class__, "DEFAULT_PORT")
+            portnum = self.proxy.port if self.proxy is not None else getattr(
+                self.proxy.__class__, "DEFAULT_PORT"
+            )
             dest = destpair
             destpair = (self.proxy.addr, portnum)
 
-        origsocket.connect(self, (destpair[0], destpair[1]))
+        super(ProxySocket, self).connect((destpair[0], destpair[1]))
 
         if self.proxy is not None:
             self.proxy.negotiate(self, dest[0], dest[1])
