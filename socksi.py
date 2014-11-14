@@ -34,18 +34,11 @@ import socket
 import struct
 import collections
 
-proxytypes = collections.OrderedDict([
-    ("SOCKS4", 1080),
-    ("SOCKS5", 1080),
-    ("HTTP", 8080)
-])
-
 
 class Proxy(object):
     """docstring for Proxy"""
-    def __init__(self, type=None, addr=None, port=None, rdns=True, username=None, password=None):
+    def __init__(self, addr=None, port=None, rdns=True, username=None, password=None):
         super(Proxy, self).__init__()
-        self.type = type
         self.addr = addr
         self.port = port
         self.rdns = rdns
@@ -55,6 +48,233 @@ class Proxy(object):
 
     def chain(self, proxy):
         self.next = proxy
+
+    def getproxysockname(self):
+        """getsockname() -> address info
+        Returns the bound IP address and port number at the proxy.
+        """
+        return self.__proxysockname
+
+    def getproxypeername(self):
+        """getproxypeername() -> address info
+        Returns the IP and port number of the proxy.
+        """
+        return origsocket.getpeername(self)
+
+    def getpeername(self):
+        """getpeername() -> address info
+        Returns the IP address and port number of the destination
+        machine (note: getproxypeername returns the proxy)
+        """
+        return self.__proxypeername
+
+
+class Socks5Proxy(Proxy):
+    DEFAULT_PORT = 1080
+
+    def __init__(self, *args, **kwargs):
+        super(Socks5Proxy, self).__init__(*args, **kwargs)
+
+    def negotiate(self, sock, destaddr, destport):
+        """negotiatesocks5(self,destaddr,destport)
+        Negotiates a connection through a SOCKS5 server.
+        """
+        # First we'll send the authentication packages we support.
+        if any((self.username, self.password)):
+            # The username/password details were supplied to the
+            # setproxy method so we support the USERNAME/PASSWORD
+            # authentication (in addition to the standard none).
+            sock.sendall("\x05\x02\x00\x02")
+        else:
+            # No username/password were entered, therefore we
+            # only support connections with no authentication.
+            sock.sendall("\x05\x01\x00")
+        # We'll receive the server's response to determine which
+        # method was selected
+        chosen_auth = sock.recvall(2)
+        if chosen_auth[0] != "\x05":
+            sock.close()
+            raise GeneralProxyError((1, _generalerrors[1]))
+        # Check the chosen authentication method
+        elif chosen_auth[1] == "\x00":
+            # No authentication is required
+            pass
+        elif chosen_auth[1] == "\x02":
+            # Okay, we need to perform a basic username/password
+            # authentication.
+            sock.sendall(
+                "\x01%c%s%c%s" % (
+                    chr(len(self.username)),
+                    self.username,
+                    chr(len(self.password)),
+                    self.password
+                )
+            )
+            authstat = sock.recvall(2)
+            if authstat[0] != "\x01":
+                # Bad response
+                sock.close()
+                raise GeneralProxyError((1, _generalerrors[1]))
+            if authstat[1] != "\x00":
+                # Authentication failed
+                sock.close()
+                raise Socks5AuthError((3, _socks5autherrors[3]))
+                # Authentication succeeded
+        else:
+            # Reaching here is always bad
+            sock.close()
+            if chosenauth[1] == "\xFF":
+                raise Socks5AuthError((2, _socks5autherrors[2]))
+            else:
+                raise GeneralProxyError((1, _generalerrors[1]))
+        # Now we can request the actual connection
+        req = "\x05\x01\x00"
+        # If the given destination address is an IP address, we'll
+        # use the IPv4 address request even if remote resolving was specified.
+        try:
+            ipaddr = socket.inet_aton(destaddr)
+            req = req + "\x01" + ipaddr
+        except socket.error:
+            # Well it's not an IP number,  so it's probably a DNS name.
+            if self.rdns is True:
+                # Resolve remotely
+                ipaddr = None
+                req = req + "\x03" + chr(len(destaddr)) + destaddr
+            else:
+                # Resolve locally
+                ipaddr = socket.inet_aton(socket.gethostbyname(destaddr))
+                req = req + "\x01" + ipaddr
+        req = req + struct.pack(">H", destport)
+        sock.sendall(req)
+        # Get the response
+        resp = sock.recvall(4)
+        if resp[0] != "\x05":
+            sock.close()
+            raise GeneralProxyError((1, _generalerrors[1]))
+        elif resp[1] != "\x00":
+            # Connection failed
+            sock.close()
+            if ord(resp[1]) <= 8:
+                raise Socks5Error(ord(resp[1]), _generalerrors[ord(resp[1])])
+            else:
+                raise Socks5Error(9, _generalerrors[9])
+        # Get the bound address/port
+        elif resp[3] == "\x01":
+            boundaddr = sock.recvall(4)
+        elif resp[3] == "\x03":
+            resp = resp + sock.recv(1)
+            boundaddr = sock.recvall(resp[4])
+        else:
+            sock.close()
+            raise GeneralProxyError((1, _generalerrors[1]))
+        boundport = struct.unpack(">H", sock.recvall(2))[0]
+        self.__proxysockname = (boundaddr, boundport)
+        if ipaddr is not None:
+            self.__proxypeername = (socket.inet_ntoa(ipaddr), destport)
+        else:
+            self.__proxypeername = (destaddr, destport)
+
+
+class Socks4Proxy(Proxy):
+    DEFAULT_PORT = 1080
+
+    def __init__(self, *args, **kwargs):
+        super(Socks5Proxy, self).__init__(*args, **kwargs)
+
+    def negotiate(self, sock, destaddr, destport):
+        """negotiatesocks4(self,destaddr,destport)
+        Negotiates a connection through a SOCKS4 server.
+        """
+        # Check if the destination address provided is an IP address
+        rmtrslv = False
+        try:
+            ipaddr = socket.inet_aton(destaddr)
+        except socket.error:
+            # It's a DNS name. Check where it should be resolved.
+            if self.rdns is True:
+                ipaddr = "\x00\x00\x00\x01"
+                rmtrslv = True
+            else:
+                ipaddr = socket.inet_aton(socket.gethostbyname(destaddr))
+        # Construct the request packet
+        req = "\x04\x01" + struct.pack(">H", destport) + ipaddr
+        # The username parameter is considered userid for SOCKS4
+        if self.username is not None:
+            req = req + self.username
+            req = req + "\x00"
+        # DNS name if remote resolving is required
+        # NOTE: This is actually an extension to the SOCKS4 protocol
+        # called SOCKS4A and may not be supported in all cases.
+        if rmtrslv is True:
+            req = req + destaddr + "\x00"
+        sock.sendall(req)
+        # Get the response from the server
+        resp = sock.recvall(8)
+        if resp[0] != "\x00":
+            # Bad data
+            sock.close()
+            raise GeneralProxyError((1, _generalerrors[1]))
+        if resp[1] != "\x5A":
+            # Server returned an error
+            sock.close()
+            if ord(resp[1]) in (91, 92, 93):
+                sock.close()
+                raise Socks4Error(
+                    (ord(resp[1]), _socks4errors[ord(resp[1]) - 90])
+                )
+            else:
+                raise Socks4Error((94, _socks4errors[4]))
+        # Get the bound address/port
+        self.__proxysockname = (
+            socket.inet_ntoa(resp[4:]),
+            struct.unpack(">H", resp[2:4])[0]
+        )
+        if rmtrslv is not None:
+            self.__proxypeername = (socket.inet_ntoa(ipaddr), destport)
+        else:
+            self.__proxypeername = (destaddr, destport)
+
+
+class HTTPProxy(Proxy):
+    DEFAULT_PORT = 8080
+
+    def __init__(self, *args, **kwargs):
+        super(Socks5Proxy, self).__init__(*args, **kwargs)
+
+    def negotiate(self, sock, destaddr, destport):
+        """negotiatehttp(self,destaddr,destport)
+        Negotiates a connection through an HTTP server.
+        """
+        # If we need to resolve locally, we do this now
+        if self.rdns is False:
+            addr = socket.gethostbyname(destaddr)
+        else:
+            addr = destaddr
+        sock.sendall(
+            "CONNECT %s:%s HTTP/1.1\r\nHost: %s\r\n\r\n" % (
+                addr, str(destport), destaddr
+            )
+        )
+        # We read the response until we get the string "\r\n\r\n"
+        resp = sock.recv(1)
+        while resp.find("\r\n\r\n") == -1:
+            resp = resp + sock.recv(1)
+        # We just need the first line to check if the connection
+        # was successful
+        statusline = resp.splitlines()[0].split(" ", 2)
+        if statusline[0] not in ("HTTP/1.0", "HTTP/1.1"):
+            sock.close()
+            raise GeneralProxyError((1, _generalerrors[1]))
+        try:
+            statuscode = int(statusline[1])
+        except ValueError:
+            sock.close()
+            raise GeneralProxyError((1, _generalerrors[1]))
+        if statuscode != 200:
+            sock.close()
+            raise HTTPError((statuscode, statusline[2]))
+        self.__proxysockname = ("0.0.0.0", 0)
+        self.__proxypeername = (addr, destport)
 
 defaultproxy = None
 origsocket = socket.socket
@@ -140,8 +360,10 @@ _socks5autherrors = (
 _socks4errors = (
     "request granted",
     "request rejected or failed",
-    "request rejected because SOCKS server cannot connect to identd on the client",
-    "request rejected because the client program and identd report different user-ids",
+    "request rejected because SOCKS server cannot connect to identd\
+ on the client",
+    "request rejected because the client program and identd report\
+ different user-ids",
     "unknown error"
 )
 
@@ -169,8 +391,8 @@ class ProxySocket(socket.socket):
         self.__proxysockname = None
         self.__proxypeername = None
 
-    def __recvall(self, bytes):
-        """__recvall(bytes) -> data
+    def recvall(self, bytes):
+        """recvall(bytes) -> data
         Receive EXACTLY the number of bytes requested from the socket.
         Blocks until the required number of bytes have been received.
         """
@@ -198,203 +420,6 @@ class ProxySocket(socket.socket):
         """
         self.proxy = proxy
 
-    def negotiatesocks5(self, destaddr, destport):
-        """negotiatesocks5(self,destaddr,destport)
-        Negotiates a connection through a SOCKS5 server.
-        """
-        # First we'll send the authentication packages we support.
-        if any((self.proxy.username, self.proxy.password)):
-            # The username/password details were supplied to the
-            # setproxy method so we support the USERNAME/PASSWORD
-            # authentication (in addition to the standard none).
-            self.sendall("\x05\x02\x00\x02")
-        else:
-            # No username/password were entered, therefore we
-            # only support connections with no authentication.
-            self.sendall("\x05\x01\x00")
-        # We'll receive the server's response to determine which
-        # method was selected
-        chosen_auth = self.__recvall(2)
-        if chosen_auth[0] != "\x05":
-            self.close()
-            raise GeneralProxyError((1, _generalerrors[1]))
-        # Check the chosen authentication method
-        elif chosen_auth[1] == "\x00":
-            # No authentication is required
-            pass
-        elif chosen_auth[1] == "\x02":
-            # Okay, we need to perform a basic username/password
-            # authentication.
-            self.sendall(
-                "\x01%c%s%c%s" % (
-                    chr(len(self.proxy.username)),
-                    self.proxy.username,
-                    chr(len(self.proxy.password)),
-                    self.proxy.password
-                )
-            )
-            authstat = self.__recvall(2)
-            if authstat[0] != "\x01":
-                # Bad response
-                self.close()
-                raise GeneralProxyError((1, _generalerrors[1]))
-            if authstat[1] != "\x00":
-                # Authentication failed
-                self.close()
-                raise Socks5AuthError((3, _socks5autherrors[3]))
-                # Authentication succeeded
-        else:
-            # Reaching here is always bad
-            self.close()
-            if chosenauth[1] == "\xFF":
-                raise Socks5AuthError((2, _socks5autherrors[2]))
-            else:
-                raise GeneralProxyError((1, _generalerrors[1]))
-        # Now we can request the actual connection
-        req = "\x05\x01\x00"
-        # If the given destination address is an IP address, we'll
-        # use the IPv4 address request even if remote resolving was specified.
-        try:
-            ipaddr = socket.inet_aton(destaddr)
-            req = req + "\x01" + ipaddr
-        except socket.error:
-            # Well it's not an IP number,  so it's probably a DNS name.
-            if self.proxy.rdns is True:
-                # Resolve remotely
-                ipaddr = None
-                req = req + "\x03" + chr(len(destaddr)) + destaddr
-            else:
-                # Resolve locally
-                ipaddr = socket.inet_aton(socket.gethostbyname(destaddr))
-                req = req + "\x01" + ipaddr
-        req = req + struct.pack(">H", destport)
-        self.sendall(req)
-        # Get the response
-        resp = self.__recvall(4)
-        if resp[0] != "\x05":
-            self.close()
-            raise GeneralProxyError((1, _generalerrors[1]))
-        elif resp[1] != "\x00":
-            # Connection failed
-            self.close()
-            if ord(resp[1]) <= 8:
-                raise Socks5Error(ord(resp[1]), _generalerrors[ord(resp[1])])
-            else:
-                raise Socks5Error(9, _generalerrors[9])
-        # Get the bound address/port
-        elif resp[3] == "\x01":
-            boundaddr = self.__recvall(4)
-        elif resp[3] == "\x03":
-            resp = resp + self.recv(1)
-            boundaddr = self.__recvall(resp[4])
-        else:
-            self.close()
-            raise GeneralProxyError((1, _generalerrors[1]))
-        boundport = struct.unpack(">H", self.__recvall(2))[0]
-        self.__proxysockname = (boundaddr, boundport)
-        if ipaddr is not None:
-            self.__proxypeername = (socket.inet_ntoa(ipaddr), destport)
-        else:
-            self.__proxypeername = (destaddr, destport)
-
-    def getproxysockname(self):
-        """getsockname() -> address info
-        Returns the bound IP address and port number at the proxy.
-        """
-        return self.__proxysockname
-
-    def getproxypeername(self):
-        """getproxypeername() -> address info
-        Returns the IP and port number of the proxy.
-        """
-        return origsocket.getpeername(self)
-
-    def getpeername(self):
-        """getpeername() -> address info
-        Returns the IP address and port number of the destination
-        machine (note: getproxypeername returns the proxy)
-        """
-        return self.__proxypeername
-
-    def negotiatesocks4(self, destaddr, destport):
-        """negotiatesocks4(self,destaddr,destport)
-        Negotiates a connection through a SOCKS4 server.
-        """
-        # Check if the destination address provided is an IP address
-        rmtrslv = False
-        try:
-            ipaddr = socket.inet_aton(destaddr)
-        except socket.error:
-            # It's a DNS name. Check where it should be resolved.
-            if self.proxy.rdns is True:
-                ipaddr = "\x00\x00\x00\x01"
-                rmtrslv = True
-            else:
-                ipaddr = socket.inet_aton(socket.gethostbyname(destaddr))
-        # Construct the request packet
-        req = "\x04\x01" + struct.pack(">H", destport) + ipaddr
-        # The username parameter is considered userid for SOCKS4
-        if self.proxy.username is not None:
-            req = req + self.proxy.username
-            req = req + "\x00"
-        # DNS name if remote resolving is required
-        # NOTE: This is actually an extension to the SOCKS4 protocol
-        # called SOCKS4A and may not be supported in all cases.
-        if rmtrslv is True:
-            req = req + destaddr + "\x00"
-        self.sendall(req)
-        # Get the response from the server
-        resp = self.__recvall(8)
-        if resp[0] != "\x00":
-            # Bad data
-            self.close()
-            raise GeneralProxyError((1, _generalerrors[1]))
-        if resp[1] != "\x5A":
-            # Server returned an error
-            self.close()
-            if ord(resp[1]) in (91, 92, 93):
-                self.close()
-                raise Socks4Error((ord(resp[1]), _socks4errors[ord(resp[1]) - 90]))
-            else:
-                raise Socks4Error((94, _socks4errors[4]))
-        # Get the bound address/port
-        self.__proxysockname = (socket.inet_ntoa(resp[4:]), struct.unpack(">H", resp[2:4])[0])
-        if rmtrslv is not None:
-            self.__proxypeername = (socket.inet_ntoa(ipaddr), destport)
-        else:
-            self.__proxypeername = (destaddr, destport)
-
-    def negotiatehttp(self, destaddr, destport):
-        """negotiatehttp(self,destaddr,destport)
-        Negotiates a connection through an HTTP server.
-        """
-        # If we need to resolve locally, we do this now
-        if self.proxy.rdns is False:
-            addr = socket.gethostbyname(destaddr)
-        else:
-            addr = destaddr
-        self.sendall("CONNECT " + addr + ":" + str(destport) + " HTTP/1.1\r\n" + "Host: " + destaddr + "\r\n\r\n")
-        # We read the response until we get the string "\r\n\r\n"
-        resp = self.recv(1)
-        while resp.find("\r\n\r\n") == -1:
-            resp = resp + self.recv(1)
-        # We just need the first line to check if the connection
-        # was successful
-        statusline = resp.splitlines()[0].split(" ", 2)
-        if statusline[0] not in ("HTTP/1.0", "HTTP/1.1"):
-            self.close()
-            raise GeneralProxyError((1, _generalerrors[1]))
-        try:
-            statuscode = int(statusline[1])
-        except ValueError:
-            self.close()
-            raise GeneralProxyError((1, _generalerrors[1]))
-        if statuscode != 200:
-            self.close()
-            raise HTTPError((statuscode, statusline[2]))
-        self.__proxysockname = ("0.0.0.0", 0)
-        self.__proxypeername = (addr, destport)
-
     def connect(self, destpair):
         """connect(self,despair)
         Connects to the specified destination through a proxy.
@@ -402,34 +427,19 @@ class ProxySocket(socket.socket):
         (identical to socket's connect).
         To select the proxy server use setproxy().
         """
-        # Do a minimal input check first
-        if (type(destpair) in (list, tuple) is False) or (len(destpair) < 2) or (type(destpair[0]) != str) or (type(destpair[1]) != int):
-            raise GeneralProxyError((5, _generalerrors[5]))
 
         if self.proxy is not None:
-            try:
-                proxytype = proxytypes.items()[self.proxy.type]
-            except IndexError:
-                raise GeneralProxyError((4, _generalerrors[4]))
-
-            try:
-                pconnect = getattr(self, "negotiate%s" % (proxytype[0].lower()))
-            except AttributeError:
-                raise GeneralProxyError((4, _generalerrors[4]))
-
-            portnum = self.proxy.port if self.proxy is not None else proxytype[1]
+            portnum = self.proxy.port if self.proxy is not None else getattr(self.proxy.__class__, "DEFAULT_PORT")
             dest = destpair
             destpair = (self.proxy.addr, portnum)
 
         origsocket.connect(self, (destpair[0], destpair[1]))
 
         if self.proxy is not None:
-            pconnect(dest[0], dest[1])
+            self.proxy.negotiate(self, dest[0], dest[1])
 
-i = 0
-for k, v in proxytypes.items():
-    setattr(socket, "PROXY_TYPE_%s" % (k), i)
-    i += 1
+for subclass in Proxy.__subclasses__():
+    setattr(socket, subclass.__name__, subclass)
 
 socket.socket = ProxySocket
 socket.Proxy = Proxy
