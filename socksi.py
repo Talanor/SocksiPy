@@ -111,7 +111,7 @@ class Socks5Proxy(Proxy):
             # Okay, we need to perform a basic username/password
             # authentication.
             sock.sendall(
-                "\x01%c%s%c%s" % (
+                b"\x01%c%s%c%s" % (
                     chr(len(self.username)),
                     self.username,
                     chr(len(self.password)),
@@ -259,7 +259,7 @@ class HTTPProxy(Proxy):
         else:
             addr = destaddr
         sock.sendall(
-            "CONNECT %s:%s HTTP/1.1\r\nHost: %s\r\n\r\n" % (
+            b"CONNECT %s:%s HTTP/1.1\r\nHost: %s\r\n\r\n" % (
                 addr, str(destport), destaddr
             )
         )
