@@ -84,22 +84,22 @@ class Socks5Proxy(Proxy):
             # The username/password details were supplied to the
             # setproxy method so we support the USERNAME/PASSWORD
             # authentication (in addition to the standard none).
-            sock.sendall("\x05\x02\x00\x02")
+            sock.sendall(b"\x05\x02\x00\x02")
         else:
             # No username/password were entered, therefore we
             # only support connections with no authentication.
-            sock.sendall("\x05\x01\x00")
+            sock.sendall(b"\x05\x01\x00")
         # We'll receive the server's response to determine which
         # method was selected
         chosen_auth = sock.recvall(2)
-        if chosen_auth[0] != "\x05":
+        if chosen_auth[0] != 0x5:
             sock.close()
             raise GeneralProxyError((1, _generalerrors[1]))
         # Check the chosen authentication method
-        elif chosen_auth[1] == "\x00":
+        elif chosen_auth[1] == 0x00:
             # No authentication is required
             pass
-        elif chosen_auth[1] == "\x02":
+        elif chosen_auth[1] == 0x02:
             # Okay, we need to perform a basic username/password
             # authentication.
             sock.sendall(
@@ -111,11 +111,11 @@ class Socks5Proxy(Proxy):
                 )
             )
             authstat = sock.recvall(2)
-            if authstat[0] != "\x01":
+            if authstat[0] != 0x01:
                 # Bad response
                 sock.close()
                 raise GeneralProxyError((1, _generalerrors[1]))
-            if authstat[1] != "\x00":
+            if authstat[1] != 0x00:
                 # Authentication failed
                 sock.close()
                 raise Socks5AuthError((3, _socks5autherrors[3]))
@@ -123,35 +123,35 @@ class Socks5Proxy(Proxy):
         else:
             # Reaching here is always bad
             sock.close()
-            if chosenauth[1] == "\xFF":
+            if chosen_auth[1] == 0xFF:
                 raise Socks5AuthError((2, _socks5autherrors[2]))
             else:
                 raise GeneralProxyError((1, _generalerrors[1]))
         # Now we can request the actual connection
-        req = "\x05\x01\x00"
+        req = b"\x05\x01\x00"
         # If the given destination address is an IP address, we'll
         # use the IPv4 address request even if remote resolving was specified.
         try:
             ipaddr = socket.inet_aton(destaddr)
-            req = req + "\x01" + ipaddr
+            req = req + b"\x01" + ipaddr
         except socket.error:
             # Well it's not an IP number,  so it's probably a DNS name.
             if self.rdns is True:
                 # Resolve remotely
                 ipaddr = None
-                req = req + "\x03" + chr(len(destaddr)) + destaddr
+                req = req + b"\x03" + chr(len(destaddr)) + destaddr
             else:
                 # Resolve locally
                 ipaddr = socket.inet_aton(socket.gethostbyname(destaddr))
-                req = req + "\x01" + ipaddr
+                req = req + b"\x01" + ipaddr
         req = req + struct.pack(">H", destport)
         sock.sendall(req)
         # Get the response
         resp = sock.recvall(4)
-        if resp[0] != "\x05":
+        if resp[0] != 0x05:
             sock.close()
             raise GeneralProxyError((1, _generalerrors[1]))
-        elif resp[1] != "\x00":
+        elif resp[1] != 0x00:
             # Connection failed
             sock.close()
             if ord(resp[1]) <= 8:
@@ -159,9 +159,9 @@ class Socks5Proxy(Proxy):
             else:
                 raise Socks5Error(9, _generalerrors[9])
         # Get the bound address/port
-        elif resp[3] == "\x01":
+        elif resp[3] == 0x01:
             boundaddr = sock.recvall(4)
-        elif resp[3] == "\x03":
+        elif resp[3] == 0x03:
             resp = resp + sock.recv(1)
             boundaddr = sock.recvall(resp[4])
         else:
@@ -192,29 +192,29 @@ class Socks4Proxy(Proxy):
         except socket.error:
             # It's a DNS name. Check where it should be resolved.
             if self.rdns is True:
-                ipaddr = "\x00\x00\x00\x01"
+                ipaddr = b"\x00\x00\x00\x01"
                 rmtrslv = True
             else:
                 ipaddr = socket.inet_aton(socket.gethostbyname(destaddr))
         # Construct the request packet
-        req = "\x04\x01" + struct.pack(">H", destport) + ipaddr
+        req = b"\x04\x01" + struct.pack(">H", destport) + ipaddr
         # The username parameter is considered userid for SOCKS4
         if self.username is not None:
             req = req + self.username
-            req = req + "\x00"
+            req = req + b"\x00"
         # DNS name if remote resolving is required
         # NOTE: This is actually an extension to the SOCKS4 protocol
         # called SOCKS4A and may not be supported in all cases.
         if rmtrslv is True:
-            req = req + destaddr + "\x00"
+            req = req + destaddr + b"\x00"
         sock.sendall(req)
         # Get the response from the server
         resp = sock.recvall(8)
-        if resp[0] != "\x00":
+        if resp[0] != 0x00:
             # Bad data
             sock.close()
             raise GeneralProxyError((1, _generalerrors[1]))
-        if resp[1] != "\x5A":
+        if resp[1] != 0x5A:
             # Server returned an error
             sock.close()
             if ord(resp[1]) in (91, 92, 93):
@@ -395,7 +395,7 @@ class ProxySocket(socket.socket):
         Receive EXACTLY the number of bytes requested from the socket.
         Blocks until the required number of bytes have been received.
         """
-        data = ""
+        data = b""
         while len(data) < bytes:
             data = data + self.recv(bytes-len(data))
         return data
