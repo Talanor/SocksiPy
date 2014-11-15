@@ -33,6 +33,7 @@ for tunneling connections through SOCKS proxies.
 import socket
 import struct
 import collections
+import time
 
 
 class Proxy(object):
@@ -147,7 +148,7 @@ class Socks5Proxy(Proxy):
             if self.rdns is True:
                 # Resolve remotely
                 ipaddr = None
-                req = req + b"\x03" + chr(len(destaddr)) + destaddr
+                req = req + b"\x03" + bytes([len(destaddr)]) + bytes(destaddr, "utf-8")
             else:
                 # Resolve locally
                 ipaddr = socket.inet_aton(socket.gethostbyname(destaddr))
@@ -187,7 +188,7 @@ class Socks4Proxy(Proxy):
     DEFAULT_PORT = 1080
 
     def __init__(self, *args, **kwargs):
-        super(Socks5Proxy, self).__init__(*args, **kwargs)
+        super(Socks4Proxy, self).__init__(*args, **kwargs)
 
     def negotiate(self, sock, destaddr, destport):
         """negotiatesocks4(self,destaddr,destport)
@@ -247,7 +248,7 @@ class HTTPProxy(Proxy):
     DEFAULT_PORT = 8080
 
     def __init__(self, *args, **kwargs):
-        super(Socks5Proxy, self).__init__(*args, **kwargs)
+        super(HTTPProxy, self).__init__(*args, **kwargs)
 
     def negotiate(self, sock, destaddr, destport):
         """negotiatehttp(self,destaddr,destport)
@@ -398,14 +399,15 @@ class ProxySocket(socket.socket):
         self.__proxysockname = None
         self.__proxypeername = None
 
-    def recvall(self, bytes):
-        """recvall(bytes) -> data
+    def recvall(self, length):
+        """recvall(length) -> data
         Receive EXACTLY the number of bytes requested from the socket.
         Blocks until the required number of bytes have been received.
         """
         data = b""
-        while len(data) < bytes:
-            data = data + self.recv(bytes-len(data))
+        while len(data) < length:
+            data = data + self.recv(length - len(data))
+            time.sleep(0.0001)
         return data
 
     def setproxy(self, proxy):
@@ -444,7 +446,7 @@ class ProxySocket(socket.socket):
         )
 
         proxy = self.proxy
-        again = True
+        again = proxy is not None
         while again is True:
             if proxy.next is None:
                 destpair = dest
